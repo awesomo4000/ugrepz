@@ -1,8 +1,0 @@
-[
-  {
-    "file": "Hello.java",
-    "matches": [
-      { "match": "public class Hello // prints a Hello World! greeting" }
-    ]
-  }
-]
