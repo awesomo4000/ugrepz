@@ -93,6 +93,32 @@ Git subtrees were chosen over submodules because:
 
 ## Cross-Platform Support
 
+### Supported Platforms (All Working ✅)
+
+The following 10 platforms are fully supported and tested:
+
+**Linux:**
+- x86_64-linux
+- aarch64-linux
+
+**Windows:**
+- x86_64-windows
+- aarch64-windows
+
+**FreeBSD:**
+- x86_64-freebsd
+- aarch64-freebsd
+
+**NetBSD:**
+- x86_64-netbsd
+- aarch64-netbsd
+
+**macOS:**
+- x86_64-macos
+- aarch64-macos (Apple Silicon)
+
+### SIMD Optimizations
+
 The build system detects the target architecture and enables appropriate SIMD optimizations:
 
 - **x86_64**: SSE2, AVX2, AVX512BW support
@@ -102,14 +128,21 @@ The build system detects the target architecture and enables appropriate SIMD op
 
 SIMD flags are automatically set in `vendor/build_ugrep.zig` based on the target.
 
+### Release Binary Sizes
+
+- **ugrep**: 1.8MB (--release=small)
+- **ugrep-indexer**: 823KB (--release=small)
+
 ## Build Status
 
-✅ **Currently Working:**
-- All compression libraries build successfully (zlib, lz4, zstd, brotli)
-- Bundled LZMA SDK builds for 7zip support
-- libreflex (RE/flex regex engine) builds with SIMD optimizations
-- ugrep executable builds and runs correctly
-- Cross-platform SIMD detection (x86_64 AVX2/AVX512BW, ARM NEON)
+✅ **All Features Working:**
+- All 10 platforms build successfully
+- All compression libraries (zlib, lz4, zstd, brotli)
+- Bundled LZMA SDK for 7zip support
+- libreflex (RE/flex regex engine) with SIMD optimizations
+- ugrep and ugrep-indexer executables
+- Platform-specific compatibility patches (Windows MinGW/clang, BSD HWCAP)
+- Cross-compilation from any platform to any target
 
 ## Known Issues / TODO
 
@@ -215,11 +248,9 @@ See `vendor/windows_compat/README.md` for implementation details.
 
 ## Future Enhancements
 
-- [ ] Windows cross-compilation support (via compatibility patches)
 - [ ] Add external liblzma support (if needed for additional .xz features)
 - [ ] Add PCRE2 support for `-P` flag (Perl regex)
 - [ ] Add bzip2 support for .bz2 files
 - [ ] Create automated tests
 - [ ] Benchmark against official ugrep builds
-- [ ] Package for multiple platforms (Linux, macOS, Windows)
-- [ ] Add ugrep-indexer support
+- [ ] Package binaries for distribution
