@@ -45,4 +45,57 @@ pub fn build(b: *std.Build) void {
     libs_step.dependOn(&libs.lz4.step);
     libs_step.dependOn(&libs.zstd.step);
     libs_step.dependOn(&libs.brotli.step);
+
+    // Export library module for dependent projects
+    // Usage: const ugrepz = b.dependency("ugrepz", .{}).module("ugrepz");
+    _ = b.addModule("ugrepz", .{
+        .root_source_file = b.path("src/root.zig"),
+    });
+
+    // Build demo executable that uses the wrapper API
+    const demo_exe = b.addExecutable(.{
+        .name = "ugrepz-demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(demo_exe);
+
+    // Create run step for demo
+    const run_demo_step = b.step("run-demo", "Run the ugrepz API demo");
+    const run_demo_cmd = b.addRunArtifact(demo_exe);
+    run_demo_cmd.step.dependOn(b.getInstallStep()); // Ensure ugrep is built first
+    if (b.args) |args| {
+        run_demo_cmd.addArgs(args);
+    }
+    run_demo_step.dependOn(&run_demo_cmd.step);
+
+    // Add test step for the library (unit tests - no binary needed)
+    const lib_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_lib_tests = b.addRunArtifact(lib_tests);
+    const test_step = b.step("test", "Run library unit tests");
+    test_step.dependOn(&run_lib_tests.step);
+
+    // Add integration test step (requires ugrep binary)
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_ugrep.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+    // Integration tests depend on ugrep being built
+    run_integration_tests.step.dependOn(b.getInstallStep());
+
+    const test_api_step = b.step("test-api", "Run API integration tests (requires built ugrep)");
+    test_api_step.dependOn(&run_integration_tests.step);
 }
