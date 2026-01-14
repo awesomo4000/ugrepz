@@ -103,22 +103,36 @@ pub fn parseLine(line: []const u8) ?ParsedLine {
     if (mem.eql(u8, line, "--")) return null;
 
     // Find the separator between filename and line number
-    // We need to handle filenames that may contain colons or dashes
-    // Look for pattern: <sep><digits><sep> where sep is : or -
-    var i: usize = 0;
+    // We need to handle filenames that may contain colons, dashes, and digit sequences
+    // Scan from the END backwards to find the LAST <sep><digits><sep> pattern
+    // This correctly handles filenames like: file-123-abc-456-def.txt:789:content
+    // where -456- could be mistaken for a line number if scanning from start
     var sep_pos: ?usize = null;
 
-    while (i < line.len) : (i += 1) {
+    // Start from end, look for content separator (: or -) then digits then filename separator
+    // The pattern we're looking for (from right to left) is: <content>:<linenum>:<filename>
+    // or <content>-<linenum>-<filename> for context lines
+    if (line.len < 3) return null; // Minimum: "f:1:" or "f-1-"
+
+    var i: usize = line.len - 1;
+    while (i >= 2) : (i -= 1) {
         const c = line[i];
-        if ((c == ':' or c == '-') and i + 1 < line.len and std.ascii.isDigit(line[i + 1])) {
-            // Found potential separator, verify digits followed by another separator
-            var j = i + 1;
-            while (j < line.len and std.ascii.isDigit(line[j])) : (j += 1) {}
-            if (j < line.len and (line[j] == ':' or line[j] == '-')) {
-                sep_pos = i;
+        // Look for potential second separator (after line number, before content)
+        if (c == ':' or c == '-') {
+            // Check if preceded by digits
+            var j = i - 1;
+            while (j > 0 and std.ascii.isDigit(line[j])) : (j -= 1) {}
+
+            // j now points to character before the digits (or 0 if we hit start)
+            // Check if there's at least one digit and a separator before them
+            if (j < i - 1 and (line[j] == ':' or line[j] == '-')) {
+                // Found pattern: <sep><digits><sep>
+                // line[j] is first sep, line[j+1..i] is line number, line[i] is second sep
+                sep_pos = j;
                 break;
             }
         }
+        if (i == 0) break;
     }
 
     const first_sep = sep_pos orelse return null;
@@ -341,4 +355,22 @@ test "parseLine - separator line" {
 test "parseLine - empty line" {
     const result = parseLine("");
     try std.testing.expect(result == null);
+}
+
+test "parseLine - filename with digit sequences that look like line numbers" {
+    // This filename contains -6357- which could be mistaken for a line number
+    const result = parseLine("waf-detect-10.244.128.78_3737-061584d1-6357-468e-abdc-e65da8b1dd80-apachegeneric.md:123:actual content");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("waf-detect-10.244.128.78_3737-061584d1-6357-468e-abdc-e65da8b1dd80-apachegeneric.md", result.?.filename);
+    try std.testing.expectEqual(@as(u32, 123), result.?.line_num);
+    try std.testing.expectEqualStrings("actual content", result.?.content);
+    try std.testing.expect(result.?.is_match);
+}
+
+test "parseLine - filename with multiple dash-digit-dash patterns" {
+    const result = parseLine("file-123-test-456-data.txt:789:content here");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("file-123-test-456-data.txt", result.?.filename);
+    try std.testing.expectEqual(@as(u32, 789), result.?.line_num);
+    try std.testing.expectEqualStrings("content here", result.?.content);
 }
