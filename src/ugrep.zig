@@ -85,6 +85,7 @@ pub const SearchError = error{
     SpawnFailed,
     OutputTooLarge,
     OutOfMemory,
+    ParseError,
 };
 
 /// Parsed line result (internal)
@@ -217,30 +218,19 @@ pub fn search(
     else
         findBinary(arena) orelse return SearchError.BinaryNotFound;
 
-    // Build argument list
+    // Build argument list - use JSON output for reliable parsing
     var args: std.ArrayList([]const u8) = .empty;
 
     try args.append(arena, binary_path);
+    try args.append(arena, "--json");
+    try args.append(arena, "-n"); // Line numbers in JSON
+    try args.append(arena, "-H"); // Always include filename in output
 
     if (options.recursive) try args.append(arena, "-r");
     if (options.fixed_strings) try args.append(arena, "-F");
     if (options.ignore_case) try args.append(arena, "-i");
-    if (options.line_numbers) try args.append(arena, "-n");
 
-    // Context options
-    if (options.context > 0) {
-        try args.append(arena, "-C");
-        try args.append(arena, try std.fmt.allocPrint(arena, "{d}", .{options.context}));
-    } else {
-        if (options.context_before > 0) {
-            try args.append(arena, "-B");
-            try args.append(arena, try std.fmt.allocPrint(arena, "{d}", .{options.context_before}));
-        }
-        if (options.context_after > 0) {
-            try args.append(arena, "-A");
-            try args.append(arena, try std.fmt.allocPrint(arena, "{d}", .{options.context_after}));
-        }
-    }
+    // Note: Context is handled by reading files directly, not by ugrep
 
     if (options.max_count) |max| {
         try args.append(arena, "-m");
@@ -261,9 +251,6 @@ pub fn search(
         try args.append(arena, "--exclude");
         try args.append(arena, glob);
     }
-
-    // Always disable color for parsing
-    try args.append(arena, "--color=never");
 
     // Separator to prevent pattern from being parsed as option
     try args.append(arena, "--");
@@ -286,46 +273,130 @@ pub fn search(
         return result; // Empty result, no matches
     }
 
-    // Parse output
-    var matches_list: std.ArrayList(Match) = .empty;
-    var files_map: std.StringHashMapUnmanaged(std.ArrayList(Match)) = .empty;
+    // Parse JSON output
+    const json_result = parseJsonOutput(arena, run_result.stdout, options) catch {
+        return SearchError.ParseError;
+    };
 
-    var lines = mem.splitScalar(u8, run_result.stdout, '\n');
-    while (lines.next()) |line| {
-        if (parseLine(line)) |parsed| {
-            // Copy strings to arena
-            const filename = try arena.dupe(u8, parsed.filename);
-            const content = try arena.dupe(u8, parsed.content);
+    result.matches = json_result.matches;
+    result.files = json_result.files;
 
-            const match = Match{
-                .filename = filename,
-                .line_number = parsed.line_num,
-                .content = content,
-                .is_match = parsed.is_match,
-            };
+    return result;
+}
 
-            try matches_list.append(arena, match);
+/// JSON structures for ugrep --json output
+const JsonMatch = struct {
+    line: u32,
+    match: []const u8,
+};
 
-            // Group by file
-            const gop = try files_map.getOrPut(arena, filename);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .empty;
+const JsonFileResult = struct {
+    file: ?[]const u8 = null,
+    matches: ?[]const JsonMatch = null,
+};
+
+/// Parse ugrep JSON output and add context lines by reading files
+fn parseJsonOutput(
+    arena: Allocator,
+    json_data: []const u8,
+    options: SearchOptions,
+) !struct { matches: []Match, files: std.StringHashMapUnmanaged([]Match) } {
+    var matches_list: std.ArrayList(Match) = .{};
+    var files_map: std.StringHashMapUnmanaged(std.ArrayList(Match)) = .{};
+
+    // Parse JSON array of file results
+    const parsed = std.json.parseFromSlice([]const JsonFileResult, arena, json_data, .{
+        .ignore_unknown_fields = true,
+    }) catch {
+        return error.JsonParseError;
+    };
+
+    // Calculate context range
+    const context_before = if (options.context > 0) options.context else options.context_before;
+    const context_after = if (options.context > 0) options.context else options.context_after;
+
+    // Process each file's matches
+    for (parsed.value) |file_result| {
+        const filename = file_result.file orelse continue;
+        const json_matches = file_result.matches orelse continue;
+
+        if (json_matches.len == 0) continue;
+
+        const filename_owned = try arena.dupe(u8, filename);
+
+        // Read file content for context lines
+        const file_lines = readFileLines(arena, filename) catch null;
+
+        // Collect all match line numbers for this file
+        var match_lines: std.AutoHashMapUnmanaged(u32, void) = .{};
+        for (json_matches) |jm| {
+            try match_lines.put(arena, jm.line, {});
+        }
+
+        // For each match, add context lines and the match itself
+        for (json_matches) |jm| {
+            const start_line = if (jm.line > context_before) jm.line - context_before else 1;
+            const end_line = jm.line + context_after;
+
+            // Add context before and the match and context after
+            var line_num = start_line;
+            while (line_num <= end_line) : (line_num += 1) {
+                const is_match_line = match_lines.contains(line_num);
+
+                // Get content - from file for context, from JSON for match
+                const content = if (line_num == jm.line)
+                    try arena.dupe(u8, jm.match)
+                else if (file_lines) |lines|
+                    if (line_num > 0 and line_num <= lines.len)
+                        try arena.dupe(u8, lines[line_num - 1])
+                    else
+                        continue
+                else
+                    continue;
+
+                const match = Match{
+                    .filename = filename_owned,
+                    .line_number = line_num,
+                    .content = content,
+                    .is_match = is_match_line,
+                };
+
+                try matches_list.append(arena, match);
+
+                // Group by file
+                const gop = try files_map.getOrPut(arena, filename_owned);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{};
+                }
+                try gop.value_ptr.append(arena, match);
             }
-            try gop.value_ptr.append(arena, match);
         }
     }
 
-    // Convert ArrayLists to slices for final result
-    result.matches = try matches_list.toOwnedSlice(arena);
-
-    var files_result: std.StringHashMapUnmanaged([]Match) = .empty;
+    // Convert ArrayLists to slices
+    var files_result: std.StringHashMapUnmanaged([]Match) = .{};
     var it = files_map.iterator();
     while (it.next()) |entry| {
         try files_result.put(arena, entry.key_ptr.*, try entry.value_ptr.toOwnedSlice(arena));
     }
-    result.files = files_result;
 
-    return result;
+    return .{
+        .matches = try matches_list.toOwnedSlice(arena),
+        .files = files_result,
+    };
+}
+
+/// Read a file and return array of lines
+fn readFileLines(arena: Allocator, path: []const u8) ![]const []const u8 {
+    const content = try fs.cwd().readFileAlloc(arena, path, 50 * 1024 * 1024);
+    var lines_list: std.ArrayList([]const u8) = .{};
+
+    var lines = mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        try lines_list.append(arena, line);
+    }
+
+    return lines_list.toOwnedSlice(arena);
 }
 
 // Tests
@@ -400,4 +471,57 @@ test "parseLine - complex filename with UUID-like patterns and content starting 
     try std.testing.expectEqual(@as(u32, 45), result.?.line_num);
     try std.testing.expectEqualStrings("- list item", result.?.content);
     try std.testing.expect(result.?.is_match);
+}
+
+test "search - JSON parsing with context" {
+    // Search for a known string in this source file
+    var result = search(std.testing.allocator, "SearchOptions", &.{"src/ugrep.zig"}, .{
+        .recursive = false,
+        .context = 1,
+        .binary_path = null, // Use system ugrep
+    }) catch |err| {
+        std.debug.print("Search failed: {}\n", .{err});
+        return err;
+    };
+    defer result.deinit();
+
+    // Should find matches
+    try std.testing.expect(result.matches.len > 0);
+
+    // Check that we have the filename
+    try std.testing.expectEqualStrings("src/ugrep.zig", result.matches[0].filename);
+
+    // With context=1, we should have context lines around matches
+    var has_context_line = false;
+    var has_match_line = false;
+    for (result.matches) |m| {
+        if (m.is_match) has_match_line = true;
+        if (!m.is_match) has_context_line = true;
+    }
+    try std.testing.expect(has_match_line);
+    try std.testing.expect(has_context_line);
+}
+
+test "parseJsonOutput - basic parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const json =
+        \\[
+        \\  {
+        \\    "file": "test.txt",
+        \\    "matches": [
+        \\      { "line": 5, "match": "hello world" }
+        \\    ]
+        \\  }
+        \\]
+    ;
+
+    const result = try parseJsonOutput(arena.allocator(), json, .{ .context = 0 });
+
+    try std.testing.expect(result.matches.len == 1);
+    try std.testing.expectEqualStrings("test.txt", result.matches[0].filename);
+    try std.testing.expectEqual(@as(u32, 5), result.matches[0].line_number);
+    try std.testing.expectEqualStrings("hello world", result.matches[0].content);
+    try std.testing.expect(result.matches[0].is_match);
 }
